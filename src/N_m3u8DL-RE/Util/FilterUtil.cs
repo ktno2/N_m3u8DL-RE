@@ -233,41 +233,79 @@ public static class FilterUtil
     /// </summary>
     /// <param name="selectedSteams"></param>
     /// <param name="keywords"></param>
-    public static void CleanAd(List<StreamSpec> selectedSteams, string[]? keywords)
+    public static void CleanAd(List<StreamSpec> selectedStreams)
     {
-        if (keywords == null) return;
-        var regList = keywords.Select(s => new Regex(s)).ToList();
-        foreach ( var reg in regList)
-        {
-            Logger.InfoMarkUp($"{ResString.customAdKeywordsFound}[Cyan underline]{reg}[/]");
-        }
-
-        foreach (var stream in selectedSteams)
+        foreach (var stream in selectedStreams)
         {
             if (stream.Playlist == null) continue;
 
             var countBefore = stream.SegmentsCount;
+            string lastTs = "";
+            int maxDistance = 0, count = 0;
+            double avgDistance = 0;
 
             foreach (var part in stream.Playlist.MediaParts)
             {
-                // 没有找到广告分片
-                if (part.MediaSegments.All(x => regList.All(reg => !reg.IsMatch(x.Url))))
+                // 分离不同片段
+                var filteredSegments = new List<MediaSegment>();
+                foreach (var segment in part.MediaSegments)
                 {
-                    continue;
+                    string url = segment.Url;
+
+                    // 正则匹配广告片段
+                    /*if (Regex.IsMatch(url, "\\d{5}kb|[^0]\\d{4}\\.ts|adjump"))
+                    {
+                        Logger.InfoMarkUp($"[red]Removed segment due to pattern match:[/] {url}");
+                        continue;
+                    }*/
+
+                    // 计算 Levenshtein 距离进行去重
+                    int distance = LevenshteinDistance(url, lastTs);
+                    if (maxDistance != 0 && maxDistance < 10 && distance > maxDistance)
+                    {
+                        Logger.InfoMarkUp($"[red]Removed segment due to distance:[/] {distance}, {url}");
+                        continue;
+                    }
+
+                    lastTs = url;
+                    maxDistance = Math.Max(maxDistance, distance);
+                    avgDistance = (count * avgDistance + distance) / (++count);
+                    filteredSegments.Add(segment);
                 }
-                // 找到广告分片 清理
-                part.MediaSegments = part.MediaSegments.Where(x => regList.All(reg => !reg.IsMatch(x.Url))).ToList();
+                part.MediaSegments = filteredSegments;
             }
 
-            // 清理已经为空的 part
+            // 移除空的部分
             stream.Playlist.MediaParts = stream.Playlist.MediaParts.Where(x => x.MediaSegments.Count > 0).ToList();
-
             var countAfter = stream.SegmentsCount;
 
             if (countBefore != countAfter)
             {
-                Logger.WarnMarkUp("[grey]{} segments => {} segments[/]", countBefore, countAfter);
+                Logger.WarnMarkUp($"[grey]{countBefore} segments => {countAfter} segments[/]");
             }
         }
+    }
+
+    private static int LevenshteinDistance(string s, string t)
+    {
+        if (s.Length == 0) return t.Length;
+        if (t.Length == 0) return s.Length;
+
+        int[,] distanceMatrix = new int[t.Length + 1, s.Length + 1];
+        for (int i = 0; i <= s.Length; i++) distanceMatrix[0, i] = i;
+        for (int j = 0; j <= t.Length; j++) distanceMatrix[j, 0] = j;
+
+        for (int j = 1; j <= t.Length; j++)
+        {
+            for (int i = 1; i <= s.Length; i++)
+            {
+                int substitutionCost = s[i - 1] == t[j - 1] ? 0 : 1;
+                distanceMatrix[j, i] = Math.Min(
+                    Math.Min(distanceMatrix[j, i - 1] + 1, distanceMatrix[j - 1, i] + 1),
+                    distanceMatrix[j - 1, i - 1] + substitutionCost
+                );
+            }
+        }
+        return distanceMatrix[t.Length, s.Length];
     }
 }
