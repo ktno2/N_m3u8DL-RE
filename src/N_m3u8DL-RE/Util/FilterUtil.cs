@@ -1,10 +1,13 @@
-﻿using N_m3u8DL_RE.Common.Entity;
+using N_m3u8DL_RE.Common.Entity;
 using N_m3u8DL_RE.Common.Enum;
 using N_m3u8DL_RE.Common.Log;
 using N_m3u8DL_RE.Common.Resource;
 using N_m3u8DL_RE.Entity;
 using Spectre.Console;
 using System.Text.RegularExpressions;
+using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace N_m3u8DL_RE.Util;
 
@@ -233,79 +236,96 @@ public static class FilterUtil
     /// </summary>
     /// <param name="selectedSteams"></param>
     /// <param name="keywords"></param>
-    public static void CleanAd(List<StreamSpec> selectedStreams)
-    {
-        foreach (var stream in selectedStreams)
-        {
-            if (stream.Playlist == null) continue;
 
-            var countBefore = stream.SegmentsCount;
+    public static class FilterUtil
+    {
+        private static int LevenshteinDistance(string s, string t)
+        {
+            if (s.Length == 0) return t.Length;
+            if (t.Length == 0) return s.Length;
+
+            int[,] distanceMatrix = new int[t.Length + 1, s.Length + 1];
+
+            for (int i = 0; i <= s.Length; i++) distanceMatrix[0, i] = i;
+            for (int j = 0; j <= t.Length; j++) distanceMatrix[j, 0] = j;
+
+            for (int j = 1; j <= t.Length; j++)
+            {
+                for (int i = 1; i <= s.Length; i++)
+                {
+                    int substitutionCost = s[i - 1] == t[j - 1] ? 0 : 1;
+                    distanceMatrix[j, i] = Math.Min(
+                        Math.Min(distanceMatrix[j, i - 1] + 1, distanceMatrix[j - 1, i] + 1),
+                        distanceMatrix[j - 1, i - 1] + substitutionCost
+                    );
+                }
+            }
+
+            return distanceMatrix[t.Length, s.Length];
+        }
+
+        public static string PrunePlaylist(string playlist)
+        {
+            if (string.IsNullOrEmpty(playlist)) return playlist;
+            
+            List<string> filteredPlaylist = new List<string>();
             string lastTs = "";
             int maxDistance = 0, count = 0;
             double avgDistance = 0;
 
-            foreach (var part in stream.Playlist.MediaParts)
+            string[] chunks = playlist.Split("#EXT-X-DISCONTINUITY");
+
+            foreach (var chunk in chunks)
             {
-                // 分离不同片段
-                var filteredSegments = new List<MediaSegment>();
-                foreach (var segment in part.MediaSegments)
+                var tsMatches = Regex.Matches(chunk, @"^.*\.ts$", RegexOptions.Multiline)
+                                    .Select(m => m.Value)
+                                    .ToList();
+
+                if (tsMatches.Count == 0)
                 {
-                    string url = segment.Url;
+                    filteredPlaylist.Add(chunk);
+                    continue;
+                }
 
-                    // 正则匹配广告片段
-                    /*if (Regex.IsMatch(url, "\\d{5}kb|[^0]\\d{4}\\.ts|adjump"))
-                    {
-                        Logger.InfoMarkUp($"[red]Removed segment due to pattern match:[/] {url}");
-                        continue;
-                    }*/
+                string firstTs = tsMatches[0];
+                int distance = LevenshteinDistance(firstTs, lastTs);
 
-                    // 计算 Levenshtein 距离进行去重
-                    int distance = LevenshteinDistance(url, lastTs);
-                    if (maxDistance != 0 && maxDistance < 10 && distance > maxDistance)
-                    {
-                        Logger.InfoMarkUp($"[red]Removed segment due to distance:[/] {distance}, {url}");
-                        continue;
-                    }
+                if (maxDistance != 0 && maxDistance < 10 && distance > maxDistance)
+                {
+                    Logger.WarnMarkUp($"[red]REMOVED CHUNK by distance: {distance}[/]");
+                    continue;
+                }
 
-                    lastTs = url;
+                lastTs = firstTs;
+
+                foreach (var ts in tsMatches)
+                {
+                    distance = LevenshteinDistance(ts, lastTs);
                     maxDistance = Math.Max(maxDistance, distance);
                     avgDistance = (count * avgDistance + distance) / (++count);
-                    filteredSegments.Add(segment);
+                    Logger.InfoMarkUp($"[blue]Distance: {distance}, Avg: {avgDistance}, Max: {maxDistance}[/]");
+                    lastTs = ts;
                 }
-                part.MediaSegments = filteredSegments;
+
+                filteredPlaylist.Add(chunk);
             }
 
-            // 移除空的部分
-            stream.Playlist.MediaParts = stream.Playlist.MediaParts.Where(x => x.MediaSegments.Count > 0).ToList();
-            var countAfter = stream.SegmentsCount;
-
-            if (countBefore != countAfter)
-            {
-                Logger.WarnMarkUp($"[grey]{countBefore} segments => {countAfter} segments[/]");
-            }
+            return string.Join("#EXT-X-DISCONTINUITY", filteredPlaylist);
         }
-    }
 
-    private static int LevenshteinDistance(string s, string t)
-    {
-        if (s.Length == 0) return t.Length;
-        if (t.Length == 0) return s.Length;
-
-        int[,] distanceMatrix = new int[t.Length + 1, s.Length + 1];
-        for (int i = 0; i <= s.Length; i++) distanceMatrix[0, i] = i;
-        for (int j = 0; j <= t.Length; j++) distanceMatrix[j, 0] = j;
-
-        for (int j = 1; j <= t.Length; j++)
+        public static void CleanAd(List<StreamSpec> selectedSteams)
         {
-            for (int i = 1; i <= s.Length; i++)
+            foreach (var stream in selectedSteams)
             {
-                int substitutionCost = s[i - 1] == t[j - 1] ? 0 : 1;
-                distanceMatrix[j, i] = Math.Min(
-                    Math.Min(distanceMatrix[j, i - 1] + 1, distanceMatrix[j - 1, i] + 1),
-                    distanceMatrix[j - 1, i - 1] + substitutionCost
-                );
+                if (stream.Playlist == null || string.IsNullOrEmpty(stream.Playlist.RawText)) continue;
+                
+                Logger.InfoMarkUp("[yellow]Before pruning:[/] " + stream.Playlist.RawText.Length + " characters");
+
+                var prunedPlaylist = PrunePlaylist(stream.Playlist.RawText);
+                stream.Playlist.RawText = prunedPlaylist;
+                
+                Logger.InfoMarkUp("[green]After pruning:[/] " + stream.Playlist.RawText.Length + " characters");
             }
         }
-        return distanceMatrix[t.Length, s.Length];
     }
 }
